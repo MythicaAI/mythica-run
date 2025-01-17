@@ -1,0 +1,9 @@
+*.blend
+*.fbx
+*.usd
+*.idea
+*.swp
+*.swo
+__pycache__
+Socketed/
+
