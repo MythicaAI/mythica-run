@@ -267,7 +267,7 @@ def track_job(context: JobContext, job_id: str):
             if item_type == 'progress':
                 progress = int(result_data['progress'])
 
-        if progress == 100:  # bug that job results report completed before job is done job_results.completed
+        if job_results.completed:
             log.info("COMPLETED job_id: %s, path: %s, elapsed: %s",
                      job_id,
                      context.output_path,
@@ -290,15 +290,15 @@ def invoke_job_single_file_input(context: JobContext, file_ref: FileRef) -> Proc
     settings = {
         'auto_del': True,
         'uni_scale': 100.0,
-        'amplitude': 1.0,
-        'element_size': 0.1,
-        'lod_density': 0.5,
-        'lod_count': 3,
-        'lod1': 1.0,
-        'lod2':1.0,
-        'lod3':1.0,
-        'lod4':1.0,
-        'lod5':1.0,
+        'amplitude': 2.0,
+        'element_size': 12.0,
+        'lod_density': 23.0,
+        'lod_count': 5,
+        'lod1': 60.0,
+        'lod2': 30.0,
+        'lod3': 15.0,
+        'lod4': 7.5,
+        'lod5': 4.0,
     }
     url = f"{context.mythica_endpoint}/v1/jobs"
     json = {
