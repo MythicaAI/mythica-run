@@ -7,7 +7,7 @@ import glob
 import hashlib
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import partial
 from http import HTTPStatus
 from os import PathLike
@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     Or override via the command line
     """
     mythica_endpoint: str = 'https://api.mythica.gg'
-    mythica_api_key: str = None
+    mythica_api_key: str = ''
     mythica_job_def_id: str = 'jobdef_26dDbTDGYBu1XYSeEree23tHzvbK'  # cave generator
 
 
@@ -236,19 +236,48 @@ def build_output_path(context: JobContext, input_path: Path) -> Path:
 
 def track_job(context: JobContext, job_id: str):
     """Track job with given id"""
+    correlations = {}
+    processes = {}
+    progress = 0
+    started = datetime.now(timezone.utc)
+    deadline = started + timedelta(minutes=3)
     while True:
-        job_url = f"{context.mythica_endpoint}/v1/jobs/{job_id}"
-        results_url = f"{context.mythica_endpoint}/v1/jobs/{job_id}/results"
-        r = conn.get(job_url, headers=context.auth_header())
-        o = munchify(r.json())
-        print(o)
-
+        results_url = f"{context.mythica_endpoint}/v1/jobs/results/{job_id}"
         r = conn.get(results_url, headers=context.auth_header())
-        o = munchify(r.json())
-        print(o)
+        log.debug(f"GET {results_url} {r.status_code}: {r.text}")
+        if not r.ok:
+            log_api_error(r)
+            break
+
+        job_results = munchify(r.json())
+        if job_results.completed:
+            log.info("COMPLETED job_id: %s, path: %s, elapsed: %s",
+                     job_id,
+                     context.output_path,
+                     datetime.now(timezone.utc) - started)
+            break
+
+        for result in job_results.results:
+            result_data = result.result_data
+            if result_data.job_id != job_id:
+                raise ValueError(f"invalid job_id: {result_data.job_id}")
+            cor = result_data.correlation
+            process = result_data.process_guid
+            item_type = result_data.item_type
+            correlations[cor] = result_data
+            processes[process] = result_data
+            log.info("RESULT %s %s", item_type, result)
+
+        # handle job timeouts
+        timestamp = datetime.now(timezone.utc)
+        if timestamp > deadline:
+            log.error("TIMEOUT after %s", timestamp - started)
+            break
 
         sleep(1)
 
+    log.info("job_id: %s, %s processes, %s correlations",
+             job_id, len(processes), len(correlations))
 
 def invoke_job_single_file_input(context: JobContext, file_ref: FileRef) -> ProcessResult:
     """Invoke a single-file job with a file_id"""
