@@ -39,11 +39,9 @@ class Settings(BaseSettings):
 
     Or override via the command line
     """
-    mythica_endpoint: str = 'https://api-staging.mythica.gg'
+    mythica_endpoint: str = 'https://api.mythica.gg'
     mythica_api_key: str = '<unset>'
-
-    mythica_profile_id: str = 'prf_3Ak5EoRrBS6LysLsJFKt9kPhudrG'  # Jacob Repp on api-staging.mythica.gg
-    mythica_job_def_id: str = 'jobdef_26dDbTDGYBu1XYSeEree23tHzvbK'  # Sprocket cave generator
+    mythica_job_def_id: str = 'jobdef_26dDbTDGYBu1XYSeEree23tHzvbK'  # cave generator
 
 
 class ProcessResult(BaseModel):
@@ -138,19 +136,19 @@ def maybe_upload_file(context: JobContext, upload_ref: UploadRef) -> FileRef:
             sha1.update(content)
     existing_digest = sha1.hexdigest()
 
-
-    log.debug("looking for: %s with sha1: %s", upload_ref.package_path, existing_digest)
+    log.debug("looking for: %s with sha1: %s",
+              upload_ref.package_path, existing_digest)
 
     # find an existing file by hash if it exists that is owned by this user
     r = conn.get(f"{context.mythica_endpoint}/v1/files/by_content/{existing_digest}",
-                                  headers=context.auth_header())
+                 headers=context.auth_header())
     # return the file_id if the content digest already exists
     if r.ok:
         o = munchify(r.json())
         log.debug("found file: %s, file_id: %s with sha1: %s",
                   o.file_name,
-                        o.file_id,
-                        o.content_hash)
+                  o.file_id,
+                  o.content_hash)
         return FileRef(
             file_id=o.file_id,
             file_name=o.file_name,
@@ -168,13 +166,15 @@ def maybe_upload_file(context: JobContext, upload_ref: UploadRef) -> FileRef:
     with open(upload_ref.disk_path, 'rb') as f:
         upload_url = f"{context.mythica_endpoint}/v1/upload/store"
         m = MultipartEncoder(
-            fields={'files': (str(upload_ref.package_path), f, 'application/octet-stream')}
+            fields={'files': (str(upload_ref.package_path),
+                              f, 'application/octet-stream')}
         )
         headers = {
             **context.auth_header(),
             "Content-Type": m.content_type,
         }
-        r = conn.post(upload_url, headers=headers, data=m.to_string(), timeout=3)
+        r = conn.post(upload_url, headers=headers,
+                      data=m.to_string(), timeout=3)
         if not r.ok:
             log_api_error(r)
             r.raise_for_status()
@@ -245,7 +245,7 @@ def track_job(context: JobContext, job_id: str):
 
         r = conn.get(results_url, headers=context.auth_header())
         o = munchify(r.json())
-        print (o)
+        print(o)
 
         sleep(1)
 
@@ -261,7 +261,8 @@ def invoke_job_single_file_input(context: JobContext, file_ref: FileRef) -> Proc
         }
     }
 
-    log.debug("invoking %s, popping input %s", context.job_def_id, file_ref.file_id)
+    log.debug("invoking %s, popping input %s",
+              context.job_def_id, file_ref.file_id)
     r = requests.post(url, json=json, headers=context.auth_header())
     if not r.ok:
         log_api_error(r)
@@ -276,7 +277,8 @@ def invoke_job(context):
     """Invoke the job on the mythica backend"""
     if context.job_per_input:
         # process inputs, reset and store results
-        results = list(map(partial(invoke_job_single_file_input, context), context.inputs))
+        results = list(
+            map(partial(invoke_job_single_file_input, context), context.inputs))
         context.inputs = []
         context.results.extend(results)
     else:
@@ -288,19 +290,21 @@ def process_input_path(context: JobContext, abs_input_path: Path):
     file = os.path.basename(abs_input_path)
     package_path = as_posix_path(file)
     upload_ref = UploadRef(
-                    disk_path=abs_input_path,
-                    package_path=package_path)
+        disk_path=abs_input_path,
+        package_path=package_path)
     # upload the input path file
     file_ref = maybe_upload_file(context, upload_ref)
     context.inputs.append(file_ref)
 
     invoke_job(context)
 
+
 def walk_input_path(context: JobContext, path: Path):
     for root, _, files in os.walk(path):
         for file in files:
             process_input_path(context,
                                Path(os.path.abspath(os.path.join(root, file))))
+
 
 def glob_input_pattern(context: JobContext, pattern: str):
     matched_files = glob.glob(pattern, recursive=True)
@@ -321,6 +325,7 @@ def report(context: JobContext):
     else:
         log.error("no results")
 
+
 def process_inputs(context: JobContext, inputs: list[str]):
     """Given the raw array of inputs from the command line, handle various input types"""
     for input in inputs:
@@ -339,9 +344,11 @@ def process_inputs(context: JobContext, inputs: list[str]):
 
     report(context)
 
+
 def parse_args():
     """Parse command line arguments"""
-    parser = argparse.ArgumentParser(description='Invoke a job from the Mythica backend with some input files.')
+    parser = argparse.ArgumentParser(
+        description='Invoke a job from the Mythica backend with some input files.')
     parser.add_argument(
         '--input-file', '-i',
         dest='input',
@@ -390,7 +397,8 @@ def start_session(endpoint: str, key: str) -> str:
     r.raise_for_status()
     o = munchify(r.json())
     if not o.get('token'):
-        raise KeyError("token missing from session response %s %s", r.status_code)
+        raise KeyError(
+            "token missing from session response %s %s", r.status_code)
     token = o.token
     return token
 
@@ -400,6 +408,7 @@ def init_context(context: JobContext):
     if not os.path.exists(context.output_path):
         os.makedirs(context.output_path)
         log.info(f"created output directory: %s", context.output_path)
+
 
 def main():
     """Entrypoint"""
