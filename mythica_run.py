@@ -250,23 +250,29 @@ def track_job(context: JobContext, job_id: str):
             break
 
         job_results = munchify(r.json())
-        if job_results.completed:
-            log.info("COMPLETED job_id: %s, path: %s, elapsed: %s",
-                     job_id,
-                     context.output_path,
-                     datetime.now(timezone.utc) - started)
-            break
-
+        progress = 0
         for result in job_results.results:
             result_data = result.result_data
             if result_data.job_id != job_id:
                 raise ValueError(f"invalid job_id: {result_data.job_id}")
             cor = result_data.correlation
+            if cor in correlations:
+                # correlation already processed
+                continue
             process = result_data.process_guid
             item_type = result_data.item_type
             correlations[cor] = result_data
             processes[process] = result_data
             log.info("RESULT %s %s", item_type, result)
+            if item_type == 'progress':
+                progress = int(result_data['progress'])
+
+        if progress == 100:  # bug that job results report completed before job is done job_results.completed
+            log.info("COMPLETED job_id: %s, path: %s, elapsed: %s",
+                     job_id,
+                     context.output_path,
+                     datetime.now(timezone.utc) - started)
+            break
 
         # handle job timeouts
         timestamp = datetime.now(timezone.utc)
