@@ -252,12 +252,36 @@ def track_job(context: JobContext, job_id: str):
 
 def invoke_job_single_file_input(context: JobContext, file_ref: FileRef) -> ProcessResult:
     """Invoke a single-file job with a file_id"""
-
+    settings = {
+        'auto_del': True,
+        'uni_scale': 100.0,
+        'amplitude': 1.0,
+        'element_size': 0.1,
+        'lod_density': 0.5,
+        'lod_count': 3,
+        'lod1': 1.0,
+        'lod2':1.0,
+        'lod3':1.0,
+        'lod4':1.0,
+        'lod5':1.0,
+    }
     url = f"{context.mythica_endpoint}/v1/jobs"
     json = {
         'job_def_id': context.job_def_id,
         'params': {
-            'file_id': file_ref.file_id,
+            'input0': {'file_id': file_ref.file_id},
+            'auto_del': settings['auto_del'],
+            'uni_scale': settings['uni_scale'],
+            'amplitude': settings['amplitude'],
+            'elementsize': settings['element_size'],
+            'targetDensity': settings['lod_density'],
+            'countLod': settings['lod_count'],
+            'lod1': settings['lod1'],
+            'lod2': settings['lod2'],
+            'lod3': settings['lod3'],
+            'lod4': settings['lod4'],
+            'lod5': settings['lod5'],
+            'format': 'fbx'
         }
     }
 
