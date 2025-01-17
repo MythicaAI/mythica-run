@@ -4,6 +4,7 @@
 *.idea
 *.swp
 *.swo
+*.sh
 __pycache__
 Socketed/
 

@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     Or override via the command line
     """
     mythica_endpoint: str = 'https://api.mythica.gg'
-    mythica_api_key: str = '<unset>'
+    mythica_api_key: str = None
     mythica_job_def_id: str = 'jobdef_26dDbTDGYBu1XYSeEree23tHzvbK'  # cave generator
 
 
@@ -375,7 +375,7 @@ def parse_args():
     )
     parser.add_argument(
         "--key", "-k",
-        required=True,
+        required=False,
         default=None,
         help="Mytica API Key. Create here - https://api.mythica.gg/api-keys"
     )
@@ -419,6 +419,9 @@ def main():
     endpoint = args.endpoint or settings.mythica_endpoint
     key = args.key or settings.mythica_api_key
     job_def_id = args.job_def or settings.mythica_job_def_id
+
+    if key is None:
+        raise ValueError("no --key or MYTHICA_API_KEY set")
 
     start_session(endpoint, key)
     context = JobContext(
