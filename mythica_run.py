@@ -13,7 +13,6 @@ from functools import partial
 from os import PathLike
 from pathlib import Path, PurePosixPath
 from time import sleep
-from pyassimp import load
 from munch import munchify
 from requests_toolbelt.multipart.encoder import MultipartEncoder
 
@@ -58,6 +57,7 @@ class JobResult(BaseModel):
     num_processes: int = 0
     num_messages: int = 0
     messages: list[str] = Field(default_factory=list)
+    meshes: list[PathLike] = Field(default_factory=list)
     progress: int = 0
     state: str = None
 
@@ -250,10 +250,50 @@ def build_output_path(context: JobContext, input_path: Path) -> Path:
     return context.output_path / Path(output_path)
 
 
+def download_meshes(context: JobContext, mesh_file_ids: list[str]) -> list[PathLike]:
+    """Download all meshes and return the disk paths"""
+    downloaded_files = []
+    for mesh_file_id in mesh_file_ids:
+        download_path = download_file(
+            context.mythica_endpoint,
+            str(context.output_path),
+            mesh_file_id,
+            context.auth_header())
+        log.info("downloaded %s to %s", mesh_file_id, download_path)
+        downloaded_files.append(Path(download_path))
+    return downloaded_files
+
+
+def download_file(endpoint: str, directory: str, file_id: str, headers=None) -> str:
+    """Get the URL to download the file"""
+    url = f"{endpoint}/v1/download/info/{file_id}"
+    r = requests.get(url, headers=headers or {})
+    if not r.ok:
+        log_api_error(r)
+        r.raise_for_status()
+
+    doc = r.json()
+
+    # Download the file
+    file_name = file_id + "_" + doc['name'].replace('\\', '_').replace('/', '_')
+    file_path = os.path.join(directory, file_name)
+
+    downloaded_bytes = 0
+    with open(file_path, "w+b") as f:
+        download_req = requests.get(doc['url'], stream=True, headers=headers)
+        chunk_size = 1024 * 64
+        for chunk in download_req.iter_content(chunk_size=chunk_size):
+            if chunk:
+                downloaded_bytes += len(chunk)
+                f.write(chunk)
+
+    return file_path
+
 def track_job(context: JobContext, job_id: str, inputs: list[FileRef]) -> JobResult:
     """Track job with given id"""
     correlations = {}
     processes = {}
+    mesh_file_ids = set()
     progress = 0
     state = 'started'
     started = datetime.now(timezone.utc)
@@ -275,8 +315,12 @@ def track_job(context: JobContext, job_id: str, inputs: list[FileRef]) -> JobRes
             if result_data.job_id != job_id:
                 raise ValueError(f"invalid job_id: {result_data.job_id}")
             cor = result_data.correlation
+            for mesh_file_id in result_data.get('files', {}).get('mesh', []):
+                mesh_file_ids.add(mesh_file_id)
+
             if cor in correlations:
                 # correlation already processed
+                # todo: fix correlation bug with file/progress overlapping
                 continue
             process = result_data.process_guid
             item_type = result_data.item_type
@@ -304,8 +348,10 @@ def track_job(context: JobContext, job_id: str, inputs: list[FileRef]) -> JobRes
 
         sleep(1)
 
-    log.info("job_id: %s - %s - %s processes, %s messages",
-             job_id, state, len(processes), len(correlations))
+    log.info("job_id: %s - %s - %s processes, %s meshes",
+             job_id, state, len(processes), len(mesh_file_ids))
+
+    mesh_paths = download_meshes(context, list(mesh_file_ids))
     duration = (datetime.now(timezone.utc) - started).total_seconds()
     input_names = [str(x.disk_path) for x in inputs]
     return JobResult(
@@ -315,6 +361,7 @@ def track_job(context: JobContext, job_id: str, inputs: list[FileRef]) -> JobRes
         output_path=context.output_path,
         duration_seconds=duration,
         messages=message_log,
+        meshes=mesh_paths,
         progress=progress,
         num_processes=len(processes),
         num_messages=len(correlations),
