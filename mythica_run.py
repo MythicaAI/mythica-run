@@ -30,7 +30,7 @@ log_config(log_level="DEBUG")
 
 log = logging.getLogger(__name__)
 conn = ConnectionPool()
-supported_formats = {'.fbx', '.obj'}
+supported_formats = {'.fbx', '.obj', '.usd', '.png', '.jpg', '.jpeg', '.tiff', '.dxt'}
 
 class Settings(BaseSettings):
     """
@@ -485,7 +485,7 @@ def report(context: JobContext):
                  r.job_id,
                  r.state,
                  r.inputs,
-                 r.output_path)
+                 r.meshes)
         for m in r.messages:
             log.info("[%s] %s",r.job_id, m)
 
