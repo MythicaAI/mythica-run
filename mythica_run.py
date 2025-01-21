@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 
-# Command line automation of the Mythica PCG process
-# for Sprocket room generation
+# Command line automation of the Mythica job API
+
 import argparse
 import glob
 import hashlib
+import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
 from functools import partial
-from http import HTTPStatus
 from os import PathLike
 from pathlib import Path, PurePosixPath
 from time import sleep
-
+from pyassimp import load
 from munch import munchify
 from requests_toolbelt.multipart.encoder import MultipartEncoder
 
@@ -24,11 +24,14 @@ from pydantic import BaseModel, Field
 from connection_pool import ConnectionPool
 from log_config import log_config
 
+
+
+
 log_config(log_level="DEBUG")
 
 log = logging.getLogger(__name__)
 conn = ConnectionPool()
-
+supported_formats = {'.fbx', '.obj'}
 
 class Settings(BaseSettings):
     """
@@ -41,15 +44,22 @@ class Settings(BaseSettings):
     """
     mythica_endpoint: str = 'https://api.mythica.gg'
     mythica_api_key: str = ''
-    mythica_job_def_id: str = 'jobdef_26dDbTDGYBu1XYSeEree23tHzvbK'  # cave generator
+    # cave generator
+    mythica_job_def_id: str = 'jobdef_26dDbTDGYBu1XYSeEree23tHzvbK'
 
 
-class ProcessResult(BaseModel):
+class JobResult(BaseModel):
     """Result of a single input output invocation"""
+    job_def_id: str
+    job_id: str
     inputs: list[str]
     output_path: PathLike
-    status_code: int = HTTPStatus.OK
-    status_message: str = ''
+    duration_seconds: float = 0
+    num_processes: int = 0
+    num_messages: int = 0
+    messages: list[str] = Field(default_factory=list)
+    progress: int = 0
+    state: str = None
 
 
 class FileRef(BaseModel):
@@ -75,7 +85,7 @@ class JobContext(BaseModel):
     mythica_auth_token: str
 
     job_def_id: str = ''
-    results: list[ProcessResult] = Field(default_factory=list)
+    results: list[JobResult] = Field(default_factory=list)
     inputs: list[UploadRef] = Field(default_factory=list)
     output_path: PathLike
     job_per_input: bool
@@ -98,10 +108,12 @@ def log_api_error(response: requests.Response):
     Logs detailed information about an HTTP error from a FastAPI backend.
 
     Args:
-        response (requests.Response): The response object returned by the `requests` library.
+        response (requests.Response): The response object returned by the
+        `requests` library.
     """
     try:
-        if response.headers.get("Content-Type", "").startswith("application/json"):
+        content_type = response.headers.get("Content-Type", "")
+        if content_type.startswith("application/json"):
             response_body = str(response.json())
         else:
             response_body = response.text
@@ -126,7 +138,8 @@ def log_api_error(response: requests.Response):
 
 
 def maybe_upload_file(context: JobContext, upload_ref: UploadRef) -> FileRef:
-    """Upload a file from a package path if it's hash doesn't exist, return its asset contents"""
+    """Upload a file from a package path if it's hash doesn't exist, return
+    its asset contents"""
 
     # get the content hash of the input file
     page_size = 64 * 1024
@@ -140,7 +153,9 @@ def maybe_upload_file(context: JobContext, upload_ref: UploadRef) -> FileRef:
               upload_ref.package_path, existing_digest)
 
     # find an existing file by hash if it exists that is owned by this user
-    r = conn.get(f"{context.mythica_endpoint}/v1/files/by_content/{existing_digest}",
+    by_content = (f"{context.mythica_endpoint}/v1/files/"
+                  f"by_content/{existing_digest}")
+    r = conn.get(by_content,
                  headers=context.auth_header())
     # return the file_id if the content digest already exists
     if r.ok:
@@ -200,7 +215,8 @@ def maybe_upload_file(context: JobContext, upload_ref: UploadRef) -> FileRef:
 
 
 def as_posix_path(path: str) -> PurePosixPath:
-    """Convert string paths to explicitly posix paths for package relative paths"""
+    """Convert string paths to explicitly posix paths for
+    package relative paths"""
     return PurePosixPath(Path(path).as_posix())
 
 
@@ -234,19 +250,22 @@ def build_output_path(context: JobContext, input_path: Path) -> Path:
     return context.output_path / Path(output_path)
 
 
-def track_job(context: JobContext, job_id: str):
+def track_job(context: JobContext, job_id: str, inputs: list[FileRef]) -> JobResult:
     """Track job with given id"""
     correlations = {}
     processes = {}
     progress = 0
+    state = 'started'
     started = datetime.now(timezone.utc)
     deadline = started + timedelta(minutes=3)
+    message_log = []
     while True:
         results_url = f"{context.mythica_endpoint}/v1/jobs/results/{job_id}"
         r = conn.get(results_url, headers=context.auth_header())
         log.debug(f"GET {results_url} {r.status_code}: {r.text}")
         if not r.ok:
             log_api_error(r)
+            state = 'failed-http-request'
             break
 
         job_results = munchify(r.json())
@@ -261,6 +280,7 @@ def track_job(context: JobContext, job_id: str):
                 continue
             process = result_data.process_guid
             item_type = result_data.item_type
+            message_log.append(json.dumps(result_data))
             correlations[cor] = result_data
             processes[process] = result_data
             log.info("RESULT %s %s", item_type, result)
@@ -272,21 +292,41 @@ def track_job(context: JobContext, job_id: str):
                      job_id,
                      context.output_path,
                      datetime.now(timezone.utc) - started)
+            state = 'completed'
             break
 
         # handle job timeouts
         timestamp = datetime.now(timezone.utc)
         if timestamp > deadline:
             log.error("TIMEOUT after %s", timestamp - started)
+            state = 'job-timed-out'
             break
 
         sleep(1)
 
-    log.info("job_id: %s, %s processes, %s correlations",
-             job_id, len(processes), len(correlations))
+    log.info("job_id: %s - %s - %s processes, %s messages",
+             job_id, state, len(processes), len(correlations))
+    duration = (datetime.now(timezone.utc) - started).total_seconds()
+    input_names = [str(x.disk_path) for x in inputs]
+    return JobResult(
+        job_def_id=context.job_def_id,
+        job_id=job_id,
+        inputs=input_names,
+        output_path=context.output_path,
+        duration_seconds=duration,
+        messages=message_log,
+        progress=progress,
+        num_processes=len(processes),
+        num_messages=len(correlations),
+        state=state)
 
-def invoke_job_single_file_input(context: JobContext, file_ref: FileRef) -> ProcessResult:
+
+def invoke_job_single_file_input(
+        context: JobContext,
+        file_ref: FileRef) -> JobResult:
     """Invoke a single-file job with a file_id"""
+
+    # TODO: make dynamic
     settings = {
         'auto_del': True,
         'uni_scale': 100.0,
@@ -329,7 +369,7 @@ def invoke_job_single_file_input(context: JobContext, file_ref: FileRef) -> Proc
 
     # track the returned job
     o = munchify(r.json())
-    track_job(context, o.job_id)
+    return track_job(context, o.job_id, [file_ref])
 
 
 def invoke_job(context):
@@ -337,14 +377,31 @@ def invoke_job(context):
     if context.job_per_input:
         # process inputs, reset and store results
         results = list(
-            map(partial(invoke_job_single_file_input, context), context.inputs))
+            map(partial(invoke_job_single_file_input, context),
+                context.inputs))
         context.inputs = []
         context.results.extend(results)
     else:
         raise ValueError("Only job-per-input is supported currently")
 
 
+def build_converted_path(abs_input_path: PathLike):
+    path, ext = os.path.splitext(abs_input_path)
+    return os.path.join(path, '.usd')
+
+
 def process_input_path(context: JobContext, abs_input_path: Path):
+    _, ext = os.path.splitext(abs_input_path)
+    if ext not in supported_formats:
+        raise ValueError(f"unsupported file format {ext} importing {abs_input_path}")
+
+    # first convert if necessary
+    # if not str(abs_input_path).endswith('usd'):
+    #     output_usd_path = build_converted_path(abs_input_path)
+    #     convert_to_usd(abs_input_path, output_usd_path)
+    #     log.info("swapping converted %s for %s", output_usd_path, abs_input_path)
+    #     abs_input_path = output_usd_path
+
     # build the abs and relative file paths
     file = os.path.basename(abs_input_path)
     package_path = as_posix_path(file)
@@ -366,9 +423,10 @@ def walk_input_path(context: JobContext, path: Path):
 
 
 def glob_input_pattern(context: JobContext, pattern: str):
+    """Given a pattern, process each file matching the pattern"""
     matched_files = glob.glob(pattern, recursive=True)
     for file_path in matched_files:
-        if os.path.isfile(file_path) and file_path.lower().endswith('.fbx'):
+        if os.path.isfile(file_path):
             process_input_path(context,
                                Path(os.path.abspath(file_path)))
 
@@ -376,19 +434,20 @@ def glob_input_pattern(context: JobContext, pattern: str):
 def report(context: JobContext):
     """Log the results of the execution against the API"""
     for r in context.results:
-        log.info("%s -> %s, result: %s (%s)",
-                 r.input_fbx_path,
-                 r.output_fbx_path,
-                 r.status_code,
-                 r.status_message)
-    else:
-        log.error("no results")
+        log.info("[%s] [%s] %s -> %s",
+                 r.job_id,
+                 r.state,
+                 r.inputs,
+                 r.output_path)
+        for m in r.messages:
+            log.info("[%s] %s",r.job_id, m)
 
 
 def process_inputs(context: JobContext, inputs: list[str]):
-    """Given the raw array of inputs from the command line, handle various input types"""
+    """Given the raw array of inputs from the command line,
+    handle various input types"""
     for input in inputs:
-        if input.index('*'):
+        if input.find('*') > -1:
             glob_input_pattern(context, input)
         elif os.path.isdir(input):
             walk_input_path(context, Path(input))
@@ -407,16 +466,18 @@ def process_inputs(context: JobContext, inputs: list[str]):
 def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(
-        description='Invoke a job from the Mythica backend with some input files.')
+        description="Run a job on the Mythica infrastructure.")
     parser.add_argument(
         '--input-file', '-i',
         dest='input',
         nargs='+',
         required=True,
-        help="Add input files or input file patterns to the job invocation, if the job requires ordered inputs use explicit file paths")
+        help=("Add input files or input file patterns to the job invocation,"
+              "if the job requires ordered inputs use explicit file paths"))
     parser.add_argument(
         '--output-path', '-o',
-        help="Set the output path for the invokation - by default it will be the current working directory",
+        help=("Set the output path for the invokation - "
+              "by default it will be the current working directory"),
         required=False,
         default=os.getcwd())
     parser.add_argument(
@@ -430,7 +491,8 @@ def parse_args():
         "--endpoint", "-e",
         required=False,
         default=None,
-        help="Endpoint to use for invoking the job, See https://api-staging.mythica.gg for bleeding edge"
+        help=("Endpoint to use for invoking the job."
+              "See https://api-staging.mythica.gg for bleeding edge")
     )
     parser.add_argument(
         "--key", "-k",
@@ -449,7 +511,8 @@ def parse_args():
 
 
 def start_session(endpoint: str, key: str) -> str:
-    """Using a Mythica API key, start a new session returning the authentication token"""
+    """Using a Mythica API key, start a new session returning the
+    authentication token"""
     r = conn.get(f"{endpoint}/v1/sessions/key/{key}")
     if not r.ok:
         log_api_error(r)
@@ -466,7 +529,7 @@ def init_context(context: JobContext):
     """Do any specific initialization around the context values"""
     if not os.path.exists(context.output_path):
         os.makedirs(context.output_path)
-        log.info(f"created output directory: %s", context.output_path)
+        log.info("created output directory: %s", context.output_path)
 
 
 def main():
